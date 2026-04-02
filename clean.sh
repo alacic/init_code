@@ -7,7 +7,7 @@ echo -e "${YELLOW}This will delete all generated project files.${NC}"
 read -rp "Are you sure? (y/N): " confirm
 [[ "$confirm" =~ ^[Yy]$ ]] || exit 0
 
-rm -rf frontend backend docs
+rm -rf frontend backend docs nginx
 rm -f AGENTS.md feature_list.json progress.md docker-compose.yml .gitignore Makefile
 
 echo -e "${GREEN}Cleaned. Run ./init.sh to regenerate.${NC}"

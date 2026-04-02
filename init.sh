@@ -46,6 +46,7 @@ cat > AGENTS.md << 'AGENTS_EOF'
 
 ## Architecture
 ```
+nginx/      → Nginx reverse proxy (port 80 → frontend/backend)
 frontend/   → Next.js 14+ App Router, TypeScript, Tailwind, shadcn/ui
 backend/    → FastAPI, SQLAlchemy, Pydantic v2, Alembic migrations
 docs/       → Design docs, ADRs, API specs
@@ -73,6 +74,7 @@ Key constraints:
 | Backend dev      | `cd backend && uvicorn app.main:app --reload` |
 | Frontend dev     | `cd frontend && pnpm dev`            |
 | Run all (Docker) | `docker compose up --build`          |
+| Access (Docker)  | `http://localhost` (nginx :80)       |
 | Backend tests    | `cd backend && pytest`               |
 | Frontend tests   | `cd frontend && pnpm test`           |
 | Lint all         | `make lint`                          |
@@ -271,11 +273,16 @@ DELETE /api/v1/???/:id    → 描述
 ## 6. 架构图
 
 ```
-┌────────────┐     ┌────────────┐     ┌────────────┐
-│  Frontend   │────▶│  Backend    │────▶│  Database   │
-│  Next.js    │◀────│  FastAPI    │◀────│  PostgreSQL │
-│  :3000      │     │  :8000      │     │  :5432      │
-└────────────┘     └────────────┘     └────────────┘
+                    ┌────────────┐     ┌────────────┐
+              ┌────▶│  Frontend   │     │  Database   │
+┌──────────┐  │     │  Next.js    │     │  PostgreSQL │
+│  Nginx    │──┤     │  :3000      │     │  :5432      │
+│  :80      │  │     └────────────┘     └─────▲──────┘
+└──────────┘  │     ┌────────────┐           │
+              └────▶│  Backend    │───────────┘
+                    │  FastAPI    │
+                    │  :8000      │
+                    └────────────┘
 ```
 
 <!-- 如果有额外服务（Redis、消息队列、外部 API），在这里补充 -->
@@ -617,8 +624,8 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/harness_db
 SECRET_KEY=change-me-in-production
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 
-# CORS
-CORS_ORIGINS=["http://localhost:3000"]
+# CORS (local dev: :3000 direct, Docker: via nginx :80)
+CORS_ORIGINS=["http://localhost:3000","http://localhost","http://localhost:80"]
 ENV_EOF
 cp backend/.env.example backend/.env
 success ".env"
@@ -1153,6 +1160,27 @@ export default function RegisterPage() {
 TSEOF
 success "app/(auth)/register/page.tsx"
 
+# Enable standalone output for Docker multi-stage build
+info "Configuring Next.js standalone output..."
+if [ -f frontend/next.config.ts ]; then
+  NEXT_CONFIG="frontend/next.config.ts"
+elif [ -f frontend/next.config.mjs ]; then
+  NEXT_CONFIG="frontend/next.config.mjs"
+else
+  NEXT_CONFIG="frontend/next.config.js"
+fi
+
+cat > "$NEXT_CONFIG" << 'NEXTCFG_EOF'
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  output: "standalone",
+};
+
+export default nextConfig;
+NEXTCFG_EOF
+success "next.config (standalone output)"
+
 # Prettier config
 cat > frontend/.prettierrc << 'PRETTIER_EOF'
 {
@@ -1175,15 +1203,16 @@ cat > docker-compose.yml << 'DOCKER_EOF'
 services:
   db:
     image: postgres:16-alpine
+    container_name: __PROJECT_NAME__-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: harness_db
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - __PROJECT_NAME__-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -1191,72 +1220,218 @@ services:
       retries: 5
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: __PROJECT_NAME__-backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
-    env_file: ./backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/harness_db
+      - ENVIRONMENT=production
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/harness_db
+      - CORS_ORIGINS=["http://localhost","http://localhost:80"]
+    volumes:
+      - backend-data:/app/data
+    networks:
+      - __PROJECT_NAME__-network
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: __PROJECT_NAME__-frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - __PROJECT_NAME__-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  nginx:
+    image: nginx:alpine
+    container_name: __PROJECT_NAME__-nginx
     restart: unless-stopped
     ports:
-      - "3000:3000"
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
-    depends_on:
-      - backend
+      - "${PORT:-80}:80"
     volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - __PROJECT_NAME__-network
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+networks:
+  __PROJECT_NAME__-network:
+    driver: bridge
 
 volumes:
   pgdata:
+    driver: local
+  backend-data:
+    driver: local
 DOCKER_EOF
+sed -i '' "s/__PROJECT_NAME__/${PROJECT_NAME}/g" docker-compose.yml
 success "docker-compose.yml"
 
 cat > backend/Dockerfile << 'DOCK_EOF'
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir --upgrade pip
+RUN pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simple/
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN mkdir -p data
+
+ENV PYTHONUNBUFFERED=1
+ENV ENVIRONMENT=production
+
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 DOCK_EOF
 success "backend/Dockerfile"
 
 cat > frontend/Dockerfile << 'DOCK_EOF'
-FROM node:20-alpine
+# ===== Build Stage =====
+FROM node:22-alpine AS build
+
+RUN apk add --no-cache libc6-compat
+
+RUN corepack enable && corepack prepare pnpm@9 --activate
+
+RUN pnpm config set registry https://mirrors.cloud.tencent.com/npm/
 
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile
+
+RUN pnpm install --no-frozen-lockfile
 
 COPY . .
 
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_API_URL=
+
+RUN pnpm run build
+
+# ===== Production Stage =====
+FROM node:22-alpine AS runner
+
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --from=build /app/public ./public
+
+RUN mkdir .next
+RUN chown nextjs:nodejs .next
+
+COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+
 EXPOSE 3000
-CMD ["pnpm", "dev"]
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/ || exit 1
+
+CMD ["node", "server.js"]
 DOCK_EOF
 success "frontend/Dockerfile"
+
+# ─── Nginx ────────────────────────────────────────────────────────────────────
+step "Nginx — Reverse Proxy"
+
+mkdir -p nginx
+
+cat > nginx/nginx.conf << 'NGINX_EOF'
+upstream frontend {
+    server frontend:3000;
+}
+
+upstream backend {
+    server backend:8000;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 100M;
+
+    # Backend API — proxy to FastAPI
+    location /api/ {
+        proxy_pass http://backend/api/;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    # Backend health endpoint
+    location = /health {
+        proxy_pass http://backend/health;
+    }
+
+    # Frontend — everything else
+    location / {
+        proxy_pass http://frontend;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+NGINX_EOF
+success "nginx/nginx.conf"
 
 # ─── .gitignore ───────────────────────────────────────────────────────────────
 step "Git"
@@ -1293,9 +1468,9 @@ success ".gitignore"
 step "Makefile"
 
 cat > Makefile << 'MAKE_EOF'
-.PHONY: dev dev-backend dev-frontend docker-up docker-down lint lint-backend lint-frontend format test clean
+.PHONY: dev dev-backend dev-frontend docker-up docker-down docker-clean docker-logs docker-ps lint lint-backend lint-frontend format test clean
 
-# ─── Development ──────────────────────────────────────────────────────────────
+# ─── Development (local) ─────────────────────────────────────────────────────
 
 dev: ## Start backend + frontend in parallel
 	@make -j2 dev-backend dev-frontend
@@ -1306,16 +1481,22 @@ dev-backend: ## Start FastAPI dev server
 dev-frontend: ## Start Next.js dev server
 	cd frontend && pnpm dev
 
-# ─── Docker ───────────────────────────────────────────────────────────────────
+# ─── Docker (production-like with nginx) ─────────────────────────────────────
 
-docker-up: ## Start all services via Docker
-	docker compose up --build
+docker-up: ## Start all services (db + backend + frontend + nginx)
+	docker compose up --build -d
 
 docker-down: ## Stop all Docker services
 	docker compose down
 
 docker-clean: ## Stop and remove volumes
 	docker compose down -v
+
+docker-logs: ## Tail logs for all containers
+	docker compose logs -f
+
+docker-ps: ## Show running containers and health
+	docker compose ps
 
 # ─── Lint & Format ────────────────────────────────────────────────────────────
 
@@ -1366,17 +1547,19 @@ echo "  $PROJECT_NAME/"
 echo "  ├── AGENTS.md              ← AI agent guidance"
 echo "  ├── feature_list.json      ← Feature tracking"
 echo "  ├── progress.md            ← Sprint progress"
-echo "  ├── Makefile                ← make help 查看所有命令"
-echo "  ├── docker-compose.yml     ← Full-stack Docker"
+echo "  ├── Makefile               ← make help 查看所有命令"
+echo "  ├── docker-compose.yml     ← Full-stack Docker (db + backend + frontend + nginx)"
 echo "  ├── .gitignore"
+echo "  ├── nginx/"
+echo "  │   └── nginx.conf         ← Reverse proxy config (:80 → frontend/backend)"
 echo "  ├── docs/"
 echo "  │   ├── design.md              ← ⭐ 先填写你的项目设计"
 echo "  │   ├── example_app_design.md  ← 参考示例"
 echo "  │   └── tech_preferences.md    ← 技术选型偏好"
 echo "  ├── backend/"
-echo "  │   ├── Dockerfile"
+echo "  │   ├── Dockerfile         ← Python 3.12 multi-stage, healthcheck"
 echo "  │   ├── requirements.txt"
-echo "  │   ├── pyproject.toml    ← ruff lint 配置"
+echo "  │   ├── pyproject.toml     ← ruff lint 配置"
 echo "  │   ├── .env"
 echo "  │   ├── pytest.ini"
 echo "  │   ├── app/"
@@ -1389,7 +1572,7 @@ echo "  │   │   ├── services/       ← Business logic"
 echo "  │   │   └── prompts/        ← AI prompt templates"
 echo "  │   └── tests/"
 echo "  └── frontend/"
-echo "      ├── Dockerfile"
+echo "      ├── Dockerfile         ← Node 22 multi-stage build (standalone)"
 echo "      ├── src/"
 echo "      │   ├── app/            ← Next.js pages"
 echo "      │   ├── components/     ← React components"
@@ -1398,8 +1581,9 @@ echo "      └── .env.local"
 echo ""
 echo -e "${GREEN}${BOLD}Quick Start:${NC}"
 echo "  1. 编辑 docs/design.md 填写你的项目需求"
-echo "  2. make install    安装所有依赖"
-echo "  3. make dev        同时启动前后端"
-echo "  4. make lint       检查代码风格"
-echo "  5. make help       查看所有可用命令"
+echo "  2. make install          安装所有依赖 (本地开发)"
+echo "  3. make dev              同时启动前后端 (本地开发)"
+echo "  4. make docker-up        Docker 启动全部服务 (含 nginx)"
+echo "  5. 访问 http://localhost  通过 nginx 代理访问"
+echo "  6. make help             查看所有可用命令"
 echo ""
