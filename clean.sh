@@ -8,7 +8,7 @@ read -rp "Are you sure? (y/N): " confirm
 [[ "$confirm" =~ ^[Yy]$ ]] || exit 0
 
 rm -rf frontend backend docs nginx
-rm -f AGENTS.md feature_list.json progress.md docker-compose.yml .gitignore Makefile
+rm -f AGENTS.md docker-compose.yml .gitignore Makefile
 
 echo -e "${GREEN}Cleaned. Run ./init.sh to regenerate.${NC}"
 echo -e "(README.md preserved — delete manually if needed)"
