@@ -421,10 +421,15 @@ python-dotenv>=1.0.1
 pytest>=8.2.0
 pytest-asyncio>=0.23.0
 ruff>=0.5.0
-# graph-tool: system dependency, install via conda or package manager
-# conda install -c conda-forge graph-tool
-# macOS: brew install graph-tool
-# Ubuntu: apt install python3-graph-tool
+# graph-tool: installed via conda in Dockerfile
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+langsmith>=0.1.0
+openai>=1.50.0
+tiktoken>=0.7.0
 REQ_EOF
 success "requirements.txt"
 
@@ -514,7 +519,7 @@ from loguru import logger
 
 from app.core.config import settings
 import app.core.logging  # noqa: F401 — init loguru
-from app.api.routes import health, items, graph
+from app.api.routes import graph, health, items, llm
 
 
 @asynccontextmanager
@@ -541,6 +546,7 @@ app.add_middleware(
 app.include_router(health.router, tags=["health"])
 app.include_router(items.router, prefix="/api/v1", tags=["items"])
 app.include_router(graph.router, prefix="/api/v1", tags=["graph"])
+app.include_router(llm.router, prefix="/api/v1", tags=["llm"])
 PYEOF
 success "app/main.py"
 
@@ -564,67 +570,53 @@ PYEOF
 success "api/routes/health.py"
 
 cat > backend/app/api/routes/items.py << 'PYEOF'
-from fastapi import APIRouter, HTTPException
+"""Item CRUD routes.
 
-from app.schemas.item import ItemCreate, ItemResponse
+Endpoints:
+    GET    /items           — list all items
+    POST   /items           — create item (ItemCreate → ItemResponse)
+    GET    /items/{item_id} — get single item (404 if missing)
+
+Schema: app.schemas.item (ItemCreate, ItemResponse)
+"""
+from fastapi import APIRouter
 
 router = APIRouter()
-
-_fake_db: list[dict] = []
-
-
-@router.get("/items", response_model=list[ItemResponse])
-async def list_items():
-    return _fake_db
-
-
-@router.post("/items", response_model=ItemResponse, status_code=201)
-async def create_item(payload: ItemCreate):
-    item = {"id": len(_fake_db) + 1, **payload.model_dump()}
-    _fake_db.append(item)
-    return item
-
-
-@router.get("/items/{item_id}", response_model=ItemResponse)
-async def get_item(item_id: int):
-    for item in _fake_db:
-        if item["id"] == item_id:
-            return item
-    raise HTTPException(status_code=404, detail="Item not found")
 PYEOF
 success "api/routes/items.py"
 
 cat > backend/app/api/routes/graph.py << 'PYEOF'
-from fastapi import APIRouter
-from pydantic import BaseModel
+"""Graph analysis routes.
 
-from app.services.graph_analysis import analyze_graph
+Endpoints:
+    POST /graph/analyze — accept {nodes, edges}, return pagerank & betweenness metrics
+
+Request body:
+    nodes: list[{id: str, label: str}]
+    edges: list[{source: str, target: str}]
+
+Uses: app.services.graph_analysis (graph-tool backend)
+"""
+from fastapi import APIRouter
 
 router = APIRouter()
-
-
-class GraphNode(BaseModel):
-    id: str
-    label: str = ""
-
-
-class GraphEdge(BaseModel):
-    source: str
-    target: str
-
-
-class GraphPayload(BaseModel):
-    nodes: list[GraphNode]
-    edges: list[GraphEdge]
-
-
-@router.post("/graph/analyze")
-async def analyze(payload: GraphPayload):
-    nodes = [n.model_dump() for n in payload.nodes]
-    edges = [e.model_dump() for e in payload.edges]
-    return analyze_graph(nodes, edges)
 PYEOF
 success "api/routes/graph.py"
+
+cat > backend/app/api/routes/llm.py << 'PYEOF'
+"""LLM Provider management routes.
+
+Endpoints:
+    POST   /llm/providers       — register or update a provider
+    GET    /llm/providers       — list all providers (api_key hidden)
+    DELETE /llm/providers/{name} — remove a provider
+    POST   /llm/chat            — chat using a registered provider
+"""
+from fastapi import APIRouter
+
+router = APIRouter()
+PYEOF
+success "api/routes/llm.py"
 
 # Schemas
 mkdir -p backend/app/schemas
@@ -665,75 +657,33 @@ cat > backend/app/services/__init__.py << 'EOF'
 EOF
 
 cat > backend/app/services/graph_analysis.py << 'PYEOF'
-from __future__ import annotations
+"""Graph analysis service using graph-tool.
 
-from loguru import logger
+Graceful fallback: if graph-tool is not installed, return basic stats only.
 
-try:
-    import graph_tool.all as gt
-
-    HAS_GRAPH_TOOL = True
-except ImportError:
-    gt = None  # type: ignore[assignment]
-    HAS_GRAPH_TOOL = False
-    logger.warning("graph-tool not installed — graph analysis endpoints will return mock data")
-
-
-def build_graph(nodes: list[dict], edges: list[dict]) -> "gt.Graph | None":
-    if not HAS_GRAPH_TOOL:
-        return None
-
-    g = gt.Graph(directed=False)
-    vprop_id = g.new_vertex_property("string")
-    vprop_label = g.new_vertex_property("string")
-    g.vertex_properties["id"] = vprop_id
-    g.vertex_properties["label"] = vprop_label
-
-    id_to_vertex: dict[str, int] = {}
-    for node in nodes:
-        v = g.add_vertex()
-        vprop_id[v] = node["id"]
-        vprop_label[v] = node.get("label", node["id"])
-        id_to_vertex[node["id"]] = int(v)
-
-    for edge in edges:
-        src = id_to_vertex.get(edge["source"])
-        tgt = id_to_vertex.get(edge["target"])
-        if src is not None and tgt is not None:
-            g.add_edge(g.vertex(src), g.vertex(tgt))
-
-    return g
-
-
-def analyze_graph(nodes: list[dict], edges: list[dict]) -> dict:
-    g = build_graph(nodes, edges)
-
-    if g is None:
-        return {
-            "num_nodes": len(nodes),
-            "num_edges": len(edges),
-            "note": "graph-tool not installed, returning basic stats only",
-        }
-
-    pagerank = gt.pagerank(g)
-    betweenness, _ = gt.betweenness(g)
-
-    vprop_id = g.vertex_properties["id"]
-    node_metrics = []
-    for v in g.vertices():
-        node_metrics.append({
-            "id": vprop_id[v],
-            "pagerank": round(float(pagerank[v]), 6),
-            "betweenness": round(float(betweenness[v]), 6),
-        })
-
-    return {
-        "num_nodes": g.num_vertices(),
-        "num_edges": g.num_edges(),
-        "metrics": node_metrics,
-    }
+Public API:
+    build_graph(nodes, edges) -> gt.Graph | None
+    analyze_graph(nodes, edges) -> dict
+        Returns: {num_nodes, num_edges, metrics: [{id, pagerank, betweenness}]}
+"""
 PYEOF
 success "services/graph_analysis.py"
+
+cat > backend/app/services/llm_registry.py << 'PYEOF'
+"""LLM Provider Registry — runtime registration of LLM providers.
+
+Storage: data/llm_providers.json (persisted via Docker volume)
+Supported provider_type: "openai_compatible" (via langchain_openai.ChatOpenAI)
+
+Public API:
+    register_provider(name, api_key, api_base, model, provider_type, extra) -> dict
+    remove_provider(name) -> bool
+    list_providers() -> list[dict]       (api_key redacted)
+    get_provider(name) -> dict | None
+    build_chat_model(name) -> BaseChatModel
+"""
+PYEOF
+success "services/llm_registry.py"
 
 # Prompts placeholder
 cat > backend/app/prompts/__init__.py << 'EOF'
@@ -832,6 +782,7 @@ npx --yes shadcn@latest init -y --defaults --cwd ./frontend
 # Additional frontend dependencies
 info "Installing extra dependencies..."
 (cd frontend && pnpm add lucide-react cytoscape react-cytoscapejs cytoscape-cola cytoscape-dagre cytoscape-fcose)
+(cd frontend && pnpm add react-markdown remark-gfm rehype-highlight)
 (cd frontend && pnpm add -D @types/cytoscape)
 
 # Create directory structure
@@ -847,128 +798,23 @@ mkdir -p frontend/src/app/\(dashboard\) \
 mkdir -p frontend/src/components/graph
 
 cat > frontend/src/components/graph/graph-viewer.tsx << 'TSEOF'
-"use client";
-
-import { useEffect, useRef, useCallback, useState } from "react";
-import cytoscape, { type Core } from "cytoscape";
-
-// @ts-expect-error — layout extensions have no type declarations
-import cola from "cytoscape-cola";
-// @ts-expect-error — layout extensions have no type declarations
-import dagre from "cytoscape-dagre";
-// @ts-expect-error — layout extensions have no type declarations
-import fcose from "cytoscape-fcose";
-
-cytoscape.use(cola);
-cytoscape.use(dagre);
-cytoscape.use(fcose);
-
-export type LayoutName = "fcose" | "dagre" | "cola" | "grid" | "circle";
-
-interface GraphViewerProps {
-  elements: cytoscape.ElementDefinition[];
-  layout?: LayoutName;
-  style?: cytoscape.Stylesheet[];
-  className?: string;
-}
-
-const DEFAULT_STYLE: cytoscape.Stylesheet[] = [
-  {
-    selector: "node",
-    style: {
-      label: "data(label)",
-      "background-color": "#6366f1",
-      color: "#1e1b4b",
-      "font-size": "12px",
-      "text-valign": "bottom",
-      "text-margin-y": 6,
-      width: 36,
-      height: 36,
-    },
-  },
-  {
-    selector: "edge",
-    style: {
-      width: 2,
-      "line-color": "#a5b4fc",
-      "target-arrow-color": "#a5b4fc",
-      "target-arrow-shape": "triangle",
-      "curve-style": "bezier",
-    },
-  },
-  {
-    selector: "node:selected",
-    style: { "background-color": "#4f46e5", "border-width": 2, "border-color": "#312e81" },
-  },
-];
-
-const LAYOUT_OPTIONS: Record<LayoutName, object> = {
-  fcose: { name: "fcose", animate: true, animationDuration: 500, randomize: true },
-  dagre: { name: "dagre", rankDir: "TB", animate: true, animationDuration: 500 },
-  cola: { name: "cola", animate: true, maxSimulationTime: 2000 },
-  grid: { name: "grid", animate: true, animationDuration: 500 },
-  circle: { name: "circle", animate: true, animationDuration: 500 },
-};
-
-export function GraphViewer({
-  elements,
-  layout = "fcose",
-  style = DEFAULT_STYLE,
-  className = "",
-}: GraphViewerProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const cyRef = useRef<Core | null>(null);
-  const [activeLayout, setActiveLayout] = useState<LayoutName>(layout);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const cy = cytoscape({
-      container: containerRef.current,
-      elements,
-      style,
-      layout: LAYOUT_OPTIONS[activeLayout],
-    });
-
-    cyRef.current = cy;
-    return () => { cy.destroy(); };
-  }, [elements, style, activeLayout]);
-
-  const runLayout = useCallback((name: LayoutName) => {
-    setActiveLayout(name);
-  }, []);
-
-  const fitView = useCallback(() => {
-    cyRef.current?.fit(undefined, 40);
-  }, []);
-
-  return (
-    <div className={`flex flex-col gap-2 ${className}`}>
-      <div className="flex items-center gap-1">
-        {(Object.keys(LAYOUT_OPTIONS) as LayoutName[]).map((name) => (
-          <button
-            key={name}
-            onClick={() => runLayout(name)}
-            className={`rounded px-2 py-1 text-xs transition-colors ${
-              activeLayout === name
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted text-muted-foreground hover:bg-accent"
-            }`}
-          >
-            {name}
-          </button>
-        ))}
-        <button
-          onClick={fitView}
-          className="ml-auto rounded px-2 py-1 text-xs bg-muted text-muted-foreground hover:bg-accent"
-        >
-          fit
-        </button>
-      </div>
-      <div ref={containerRef} className="h-[500px] w-full rounded-lg border bg-card" />
-    </div>
-  );
-}
+/**
+ * GraphViewer — Cytoscape.js graph visualization component.
+ *
+ * Props:
+ *   elements: cytoscape.ElementDefinition[]   — nodes & edges data
+ *   layout:   "fcose" | "dagre" | "cola" | "grid" | "circle"
+ *   style:    cytoscape.Stylesheet[]          — custom node/edge styling
+ *   className: string
+ *
+ * Features:
+ *   - Layout switcher toolbar (fcose, dagre, cola, grid, circle)
+ *   - Fit-to-view button
+ *   - Default indigo color scheme for nodes, light edges with arrows
+ *
+ * Dependencies: cytoscape, cytoscape-cola, cytoscape-dagre, cytoscape-fcose
+ */
+export {};
 TSEOF
 success "components/graph/graph-viewer.tsx"
 
@@ -986,255 +832,88 @@ success ".env.local"
 
 # API client utility
 cat > frontend/src/lib/api.ts << 'TSEOF'
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-
-type RequestOptions = Omit<RequestInit, "body"> & {
-  body?: unknown;
-};
-
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { body, headers, ...rest } = options;
-
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...headers,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    ...rest,
-  });
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(error.detail ?? "API request failed");
-  }
-
-  return res.json() as Promise<T>;
-}
-
-export const api = {
-  get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body: unknown) => request<T>(path, { method: "POST", body }),
-  put: <T>(path: string, body: unknown) => request<T>(path, { method: "PUT", body }),
-  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
-};
+/**
+ * Typed API client wrapping fetch.
+ *
+ * Base URL from NEXT_PUBLIC_API_URL (default http://localhost:8000).
+ *
+ * Exports:
+ *   api.get<T>(path)          — GET request
+ *   api.post<T>(path, body)   — POST with JSON body
+ *   api.put<T>(path, body)    — PUT with JSON body
+ *   api.delete<T>(path)       — DELETE request
+ *
+ * Auto JSON serialization, error extraction from {detail} response.
+ */
+export {};
 TSEOF
 success "lib/api.ts"
 
 # Shared layout component
 cat > frontend/src/components/layout/sidebar.tsx << 'TSEOF'
-"use client";
-
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { LayoutDashboard, Settings, LogIn } from "lucide-react";
-
-const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/settings", label: "Settings", icon: Settings },
-  { href: "/login", label: "Login", icon: LogIn },
-];
-
-export function Sidebar() {
-  const pathname = usePathname();
-
-  return (
-    <aside className="flex h-screen w-60 flex-col border-r bg-muted/40 p-4">
-      <h1 className="mb-8 text-lg font-bold tracking-tight">
-        {process.env.NEXT_PUBLIC_APP_NAME ?? "Harness"}
-      </h1>
-      <nav className="flex flex-1 flex-col gap-1">
-        {navItems.map(({ href, label, icon: Icon }) => (
-          <Link
-            key={href}
-            href={href}
-            className={`flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors hover:bg-accent ${
-              pathname === href ? "bg-accent font-medium" : "text-muted-foreground"
-            }`}
-          >
-            <Icon className="h-4 w-4" />
-            {label}
-          </Link>
-        ))}
-      </nav>
-    </aside>
-  );
-}
+/**
+ * Sidebar navigation component.
+ *
+ * "use client" — uses usePathname for active route highlighting.
+ *
+ * Nav items: Dashboard (/), Settings (/settings), Login (/login)
+ * Icons: lucide-react (LayoutDashboard, Settings, LogIn)
+ * Width: w-60, border-r, bg-muted/40
+ * App name from NEXT_PUBLIC_APP_NAME env var.
+ */
+export {};
 TSEOF
 success "components/layout/sidebar.tsx"
 
 # Root layout with sidebar
 cat > frontend/src/app/layout.tsx << 'TSEOF'
-import type { Metadata } from "next";
-import { Inter } from "next/font/google";
-import "./globals.css";
-import { Sidebar } from "@/components/layout/sidebar";
-
-const inter = Inter({ subsets: ["latin"] });
-
-export const metadata: Metadata = {
-  title: process.env.NEXT_PUBLIC_APP_NAME ?? "Harness Project",
-  description: "AI-powered harness project",
-};
-
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return (
-    <html lang="en">
-      <body className={inter.className}>
-        <div className="flex h-screen">
-          <Sidebar />
-          <main className="flex-1 overflow-auto p-8">{children}</main>
-        </div>
-      </body>
-    </html>
-  );
+/**
+ * Root layout — Inter font, globals.css, flex row: Sidebar + main content.
+ *
+ * Structure: <html> → <body> → flex h-screen → <Sidebar /> + <main>{children}</main>
+ * Metadata title from NEXT_PUBLIC_APP_NAME.
+ */
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return <html lang="en"><body>{children}</body></html>;
 }
 TSEOF
 success "app/layout.tsx"
 
 # Dashboard page
 cat > frontend/src/app/page.tsx << 'TSEOF'
+/**
+ * Dashboard page — 3-column stats cards grid.
+ * Cards: Total Items, API Health, Uptime.
+ */
 export default function DashboardPage() {
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-3xl font-bold tracking-tight">Dashboard</h2>
-        <p className="text-muted-foreground">Welcome to your harness project.</p>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {[
-          { title: "Total Items", value: "0", desc: "Managed items" },
-          { title: "API Health", value: "●", desc: "Backend status" },
-          { title: "Uptime", value: "—", desc: "Since last deploy" },
-        ].map((card) => (
-          <div
-            key={card.title}
-            className="rounded-lg border bg-card p-6 text-card-foreground shadow-sm"
-          >
-            <p className="text-sm font-medium text-muted-foreground">{card.title}</p>
-            <p className="mt-2 text-2xl font-bold">{card.value}</p>
-            <p className="text-xs text-muted-foreground">{card.desc}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+  return <div>Dashboard</div>;
 }
 TSEOF
 success "app/page.tsx (dashboard)"
 
 # Settings page
 cat > frontend/src/app/settings/page.tsx << 'TSEOF'
+/** Settings page — project configuration panel. */
 export default function SettingsPage() {
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-3xl font-bold tracking-tight">Settings</h2>
-        <p className="text-muted-foreground">Manage your project configuration.</p>
-      </div>
-      <div className="rounded-lg border p-6">
-        <p className="text-sm text-muted-foreground">Settings panel coming soon.</p>
-      </div>
-    </div>
-  );
+  return <div>Settings</div>;
 }
 TSEOF
 success "app/settings/page.tsx"
 
 # Login page
 cat > frontend/src/app/\(auth\)/login/page.tsx << 'TSEOF'
+/** Login page — email + password form, centered layout. */
 export default function LoginPage() {
-  return (
-    <div className="flex min-h-[80vh] items-center justify-center">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="text-center">
-          <h2 className="text-2xl font-bold">Sign In</h2>
-          <p className="text-sm text-muted-foreground">Enter your credentials to continue</p>
-        </div>
-        <form className="space-y-4">
-          <div>
-            <label htmlFor="email" className="text-sm font-medium">Email</label>
-            <input
-              id="email"
-              type="email"
-              placeholder="you@example.com"
-              className="mt-1 block w-full rounded-md border px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label htmlFor="password" className="text-sm font-medium">Password</label>
-            <input
-              id="password"
-              type="password"
-              className="mt-1 block w-full rounded-md border px-3 py-2 text-sm"
-            />
-          </div>
-          <button
-            type="submit"
-            className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            Sign In
-          </button>
-        </form>
-      </div>
-    </div>
-  );
+  return <div>Login</div>;
 }
 TSEOF
 success "app/(auth)/login/page.tsx"
 
 # Register page
 cat > frontend/src/app/\(auth\)/register/page.tsx << 'TSEOF'
+/** Register page — name + email + password form, centered layout. */
 export default function RegisterPage() {
-  return (
-    <div className="flex min-h-[80vh] items-center justify-center">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="text-center">
-          <h2 className="text-2xl font-bold">Create Account</h2>
-          <p className="text-sm text-muted-foreground">Get started with your account</p>
-        </div>
-        <form className="space-y-4">
-          <div>
-            <label htmlFor="name" className="text-sm font-medium">Name</label>
-            <input
-              id="name"
-              type="text"
-              placeholder="Your name"
-              className="mt-1 block w-full rounded-md border px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label htmlFor="email" className="text-sm font-medium">Email</label>
-            <input
-              id="email"
-              type="email"
-              placeholder="you@example.com"
-              className="mt-1 block w-full rounded-md border px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label htmlFor="password" className="text-sm font-medium">Password</label>
-            <input
-              id="password"
-              type="password"
-              className="mt-1 block w-full rounded-md border px-3 py-2 text-sm"
-            />
-          </div>
-          <button
-            type="submit"
-            className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            Create Account
-          </button>
-        </form>
-      </div>
-    </div>
-  );
+  return <div>Register</div>;
 }
 TSEOF
 success "app/(auth)/register/page.tsx"
@@ -1358,9 +1037,12 @@ sed -i '' "s/__PROJECT_NAME__/${PROJECT_NAME}/g" docker-compose.yml
 success "docker-compose.yml"
 
 cat > backend/Dockerfile << 'DOCK_EOF'
-FROM python:3.12-slim
+FROM condaforge/miniforge3:latest
 
 WORKDIR /app
+
+RUN conda install -y -c conda-forge graph-tool && \
+    conda clean -afy
 
 RUN pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simple/
 

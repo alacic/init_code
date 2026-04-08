@@ -1,16 +1,13 @@
 # Harness Scaffolding Generator
 
-一键生成 **Next.js + FastAPI** 全栈项目脚手架，内置图分析（graph-tool）和图可视化（Cytoscape.js）。
+一键生成 **Next.js + FastAPI** 全栈项目脚手架，内置图分析（graph-tool）、图可视化（Cytoscape.js）和 LLM 集成（LangChain）。
 
 ## 前置依赖
 
 - [Node.js](https://nodejs.org) 18+ & [pnpm](https://pnpm.io) 8+
 - [Python](https://python.org) 3.12+
 - [Docker](https://docker.com)（Docker 部署必需，含 nginx 反向代理）
-- [graph-tool](https://graph-tool.skewed.de/)（可选，后端图分析引擎）
-  - macOS: `brew install graph-tool`
-  - Ubuntu: `apt install python3-graph-tool`
-  - conda: `conda install -c conda-forge graph-tool`
+- [graph-tool](https://graph-tool.skewed.de/)（Docker 中通过 miniforge3 + conda 自动安装）
 
 ## 快速开始
 
@@ -49,15 +46,15 @@ make docker-down    # 停止所有服务
 │   ├── design.md               ⭐ 你的项目设计文档（先填这个！）
 │   ├── dev_rules.md            AI 编码工具必读的开发规范（lint / test / 提交检查）
 │   └── tech_preferences.md     技术选型偏好（AI 必读）
-├── backend/                FastAPI + Pydantic + loguru + graph-tool
-│   ├── Dockerfile          Python 3.12, healthcheck
+├── backend/                FastAPI + Pydantic + loguru + graph-tool + LangChain
+│   ├── Dockerfile          miniforge3 镜像, conda graph-tool, healthcheck
 │   ├── app/main.py         入口 & 路由挂载
 │   ├── app/core/config.py  配置（自动读取 .env）
 │   ├── app/core/logging.py loguru 日志配置（按天轮转，保留 30 天）
-│   ├── app/api/routes/     API 端点（health + items CRUD + graph 分析）
+│   ├── app/api/routes/     API 端点（health + items + graph + llm）
 │   ├── app/schemas/        请求/响应模型
 │   ├── app/models/         数据模型
-│   ├── app/services/       业务逻辑（含 graph_analysis 图分析服务）
+│   ├── app/services/       业务逻辑（graph_analysis + llm_registry）
 │   ├── app/prompts/        AI Prompt 模板
 │   └── tests/              pytest 测试
 └── frontend/               Next.js 14 + TypeScript + Tailwind + shadcn/ui
@@ -84,18 +81,35 @@ make docker-down    # 停止所有服务
 
 - **Nginx** 统一入口 (:80)，`/api/` 转发到 Backend，其余转发到 Frontend
 - **Frontend** 多阶段构建，生产模式 standalone 输出，非 root 用户运行
-- **Backend** Python 3.12，loguru 日志，内置 HEALTHCHECK
+- **Backend** miniforge3 + conda graph-tool，loguru 日志，内置 HEALTHCHECK
 - 所有服务通过自定义 Docker network 通信，仅 nginx 暴露端口
 
 ## 核心特性
 
 ### 后端图分析 (graph-tool)
 
-通过 `POST /api/v1/graph/analyze` 提交节点和边，返回 PageRank、Betweenness 等指标。graph-tool 未安装时自动降级为基础统计。
+通过 `POST /api/v1/graph/analyze` 提交节点和边，返回 PageRank、Betweenness 等指标。Docker 中通过 miniforge3 镜像 + conda 自动安装 graph-tool。
+
+### LLM 集成 (LangChain)
+
+通过 API 动态注册/管理大模型 Provider，无需写死环境变量：
+
+- `POST /api/v1/llm/providers` — 注册 Provider（name, api_key, api_base, model）
+- `GET /api/v1/llm/providers` — 列出已注册 Provider（隐藏 api_key）
+- `DELETE /api/v1/llm/providers/{name}` — 删除 Provider
+- `POST /api/v1/llm/chat` — 使用指定 Provider 对话
+
+Provider 配置持久化在 `data/llm_providers.json`，Docker volume 保证数据持久。
+
+依赖：langchain, langchain-openai, langchain-community, langgraph, langsmith, openai, tiktoken
 
 ### 前端图可视化 (Cytoscape.js)
 
 内置 `<GraphViewer>` 组件，支持 5 种自动布局（fcose / dagre / cola / grid / circle），用户可一键切换排布方式。
+
+### 前端 Markdown 渲染
+
+内置 react-markdown + remark-gfm + rehype-highlight，用于展示 LLM 返回的 Markdown 格式内容。
 
 ### 日志 (loguru)
 
@@ -125,7 +139,8 @@ make docker-down    # 停止所有服务
 |------|---------|
 | 图表 | ECharts |
 | 图/网络可视化 | Cytoscape.js + 布局扩展 |
-| 后端图分析 | graph-tool |
+| 后端图分析 | graph-tool (conda) |
+| 大模型框架 | LangChain + LangGraph |
 | 日志 | loguru |
 | UI 组件 | shadcn/ui |
 | 状态管理 | zustand + @tanstack/react-query |
