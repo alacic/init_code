@@ -41,14 +41,14 @@ cat > AGENTS.md << 'AGENTS_EOF'
 
 ## Project Overview
 - **Name**: __PROJECT_NAME__
-- **Stack**: Next.js (frontend) + FastAPI (backend) + PostgreSQL
+- **Stack**: Next.js (frontend) + FastAPI (backend)
 - **Monorepo**: `frontend/` and `backend/` at repo root
 
 ## Architecture
 ```
 nginx/      → Nginx reverse proxy (port 80 → frontend/backend)
 frontend/   → Next.js 14+ App Router, TypeScript, Tailwind, shadcn/ui
-backend/    → FastAPI, SQLAlchemy, Pydantic v2, Alembic migrations
+backend/    → FastAPI, Pydantic v2, graph-tool (graph analysis), loguru (logging)
 docs/       → Design docs, ADRs, API specs
 ```
 
@@ -60,12 +60,15 @@ docs/       → Design docs, ADRs, API specs
 
 ## Tech Preferences (IMPORTANT)
 **Before adding ANY dependency, read `docs/tech_preferences.md`**
+**Every code change MUST pass `make lint` — see `docs/dev_rules.md`**
 
 Key constraints:
 - Charts → **ECharts** (not Recharts, Chart.js, Nivo)
-- Graph/Network visualization → **Cytoscape.js** (not D3-force, vis.js, react-flow)
+- Graph/Network visualization → **Cytoscape.js** with layout extensions (not D3-force, vis.js, react-flow)
+- Backend graph analysis → **graph-tool** (not NetworkX, igraph)
 - UI components → **shadcn/ui** only (not Ant Design, MUI, Chakra)
 - State management → **zustand** (client) + **@tanstack/react-query** (server)
+- Logging → **loguru** (not stdlib logging)
 - Always prefer mature, well-maintained libraries (see full list in docs/tech_preferences.md)
 
 ## Key Commands
@@ -78,7 +81,6 @@ Key constraints:
 | Backend tests    | `cd backend && pytest`               |
 | Frontend tests   | `cd frontend && pnpm test`           |
 | Lint all         | `make lint`                          |
-| Format all       | `make format`                        |
 
 ## Agent 使用策略（重要）
 
@@ -102,7 +104,6 @@ Key constraints:
 | 单独实现一个前端页面 | 只需 frontend 上下文，不需要后端 |
 | 写测试用例 | 只需被测代码的上下文 |
 | 修复 lint/build 错误 | 范围小，独立完成 |
-| 数据库 migration 文件生成 | 只需 models 上下文 |
 | 文档更新（README、注释） | 不影响代码逻辑 |
 | 并行开发多个独立功能 | 各 subagent 互不干扰 |
 
@@ -148,56 +149,6 @@ AGENTS_EOF
 sed -i '' "s/__PROJECT_NAME__/${PROJECT_NAME}/g" AGENTS.md
 success "AGENTS.md"
 
-cat > feature_list.json << 'FEATURES_EOF'
-{
-  "project": "harness_project",
-  "version": "0.1.0",
-  "features": [
-    {
-      "id": "F-001",
-      "name": "User Authentication",
-      "status": "planned",
-      "priority": "high",
-      "description": "JWT-based auth with login/register/logout",
-      "frontend_pages": ["/login", "/register"],
-      "backend_endpoints": ["/api/v1/auth/login", "/api/v1/auth/register"]
-    },
-    {
-      "id": "F-002",
-      "name": "Dashboard",
-      "status": "planned",
-      "priority": "high",
-      "description": "Main dashboard with overview metrics",
-      "frontend_pages": ["/dashboard"],
-      "backend_endpoints": ["/api/v1/dashboard/stats"]
-    }
-  ]
-}
-FEATURES_EOF
-success "feature_list.json"
-
-cat > progress.md << 'PROGRESS_EOF'
-# Project Progress
-
-## Sprint 1 — Foundation
-- [ ] Project scaffolding (init.sh)
-- [ ] Backend: FastAPI boilerplate + health check
-- [ ] Frontend: Next.js + shadcn/ui setup
-- [ ] Docker Compose: full-stack local dev
-- [ ] CI/CD: GitHub Actions pipeline
-
-## Sprint 2 — Core Features
-- [ ] F-001: User Authentication
-- [ ] F-002: Dashboard
-- [ ] Database migrations (Alembic)
-- [ ] API documentation (auto-generated)
-
-## Changelog
-| Date | Change | Author |
-|------|--------|--------|
-| —    | Initial scaffolding | init.sh |
-PROGRESS_EOF
-success "progress.md"
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────
 step "Documentation"
@@ -213,7 +164,6 @@ cat > docs/design.md << 'DESIGN_EOF'
   填完后，让 AI 工具读取本文件即可开始开发：
     Cursor:     "请阅读 @docs/design.md 并按计划开始实现"
     Claude Code: "读取 docs/design.md，按开发计划开始工作"
-  参考示例：docs/example_app_design.md
 ============================================================ -->
 
 ## 1. 项目名称 & 简介
@@ -248,11 +198,11 @@ cat > docs/design.md << 'DESIGN_EOF'
 
 ## 4. 数据模型
 
-<!-- 描述核心实体和字段，AI 工具会据此生成 SQLAlchemy models -->
+<!-- 描述核心实体和字段 -->
 
 ```
 实体名:
-  - id: UUID (PK)
+  - id: str (PK)
   - 字段名: 类型
   - 字段名: 类型
   - created_at: datetime
@@ -273,19 +223,19 @@ DELETE /api/v1/???/:id    → 描述
 ## 6. 架构图
 
 ```
-                    ┌────────────┐     ┌────────────┐
-              ┌────▶│  Frontend   │     │  Database   │
-┌──────────┐  │     │  Next.js    │     │  PostgreSQL │
-│  Nginx    │──┤     │  :3000      │     │  :5432      │
-│  :80      │  │     └────────────┘     └─────▲──────┘
-└──────────┘  │     ┌────────────┐           │
-              └────▶│  Backend    │───────────┘
-                    │  FastAPI    │
-                    │  :8000      │
-                    └────────────┘
+              ┌────────────┐
+        ┌────▶│  Frontend   │
+┌──────┐│     │  Next.js    │
+│Nginx ││     │  :3000      │
+│ :80  ││     └────────────┘
+└──────┘│     ┌────────────┐
+        └────▶│  Backend    │
+              │  FastAPI    │
+              │  :8000      │
+              └────────────┘
 ```
 
-<!-- 如果有额外服务（Redis、消息队列、外部 API），在这里补充 -->
+<!-- 如果有额外服务（数据库、Redis、消息队列、外部 API），在这里补充 -->
 
 ## 7. 开发计划
 
@@ -305,194 +255,62 @@ DELETE /api/v1/???/:id    → 描述
 DESIGN_EOF
 success "docs/design.md"
 
-# example_app_design.md — 完整示例
-cat > docs/example_app_design.md << 'EXAMPLE_EOF'
-# Example App Design — Task Management System
+# dev_rules.md — 开发规范约束（给 AI 编码工具的硬性规则）
+cat > docs/dev_rules.md << 'RULES_EOF'
+# 开发规范 — AI 编码工具必须遵守
 
-> 这是一份示例应用设计文档，展示如何将需求结构化地描述给 AI 编码工具。
-> 你可以复制此文件并修改为你自己的项目需求。
+> 本文档是给 AI 编码工具（Cursor / Claude Code / Codex 等）的 **硬性约束**。
+> 每次编写或修改代码后 **必须** 执行以下检查。
 
-## 1. 产品概述
+## 代码质量检查（每次修改后必做）
 
-**名称**: TaskFlow — 智能任务管理系统
+```bash
+# 后端 — 修改 Python 文件后
+make lint-backend       # ruff 检查，必须 0 error
+make format             # 自动格式化
 
-**目标用户**: 小团队（2-10 人），需要轻量级的任务追踪和协作工具
+# 前端 — 修改 TS/TSX 文件后
+make lint-frontend      # ESLint 检查，必须 0 error
 
-**核心价值**: 比 Jira 简单，比 TODO 列表强大，带 AI 辅助的任务拆分和优先级建议
-
-## 2. 功能需求
-
-### 2.1 用户系统 (F-001)
-
-| 功能 | 描述 | 优先级 |
-|------|------|--------|
-| 注册 | 邮箱 + 密码，发送验证邮件 | P0 |
-| 登录 | JWT 认证，7 天有效期 | P0 |
-| 个人资料 | 头像、昵称、时区设置 | P1 |
-| 团队邀请 | 通过邮件邀请成员加入团队 | P1 |
-
-**后端 API**:
-```
-POST   /api/v1/auth/register     — 注册
-POST   /api/v1/auth/login        — 登录，返回 JWT
-GET    /api/v1/auth/me           — 获取当前用户信息
-PUT    /api/v1/auth/me           — 更新个人资料
-POST   /api/v1/teams/invite      — 邀请成员
+# 一键全量检查
+make lint               # 同时 lint 前后端
 ```
 
-**数据模型**:
-```
-User:
-  - id: UUID (PK)
-  - email: string (unique)
-  - hashed_password: string
-  - name: string
-  - avatar_url: string?
-  - timezone: string (default: "Asia/Shanghai")
-  - created_at: datetime
-  - updated_at: datetime
+## 测试（功能变更后必做）
 
-Team:
-  - id: UUID (PK)
-  - name: string
-  - owner_id: FK → User
-  - created_at: datetime
+```bash
+# 后端
+make test-backend       # pytest，新增 API 必须有对应测试
 
-TeamMember:
-  - team_id: FK → Team
-  - user_id: FK → User
-  - role: enum(owner, admin, member)
-  - joined_at: datetime
+# 全量
+make test               # 前后端一起跑
 ```
 
-### 2.2 任务管理 (F-002)
+## 提交前检查清单
 
-| 功能 | 描述 | 优先级 |
-|------|------|--------|
-| 创建任务 | 标题、描述、标签、截止日期、负责人 | P0 |
-| 任务看板 | Kanban 视图：待办 → 进行中 → 已完成 | P0 |
-| 任务列表 | 表格视图，支持排序和筛选 | P0 |
-| 拖拽排序 | 看板内拖拽改变状态和优先级 | P1 |
-| 子任务 | 任务可拆分为多个子任务 | P1 |
-| 评论 | 任务下的评论和讨论 | P2 |
+| 检查项 | 命令 | 要求 |
+|--------|------|------|
+| Python lint | `make lint-backend` | 0 error, 0 warning |
+| TS/JS lint | `make lint-frontend` | 0 error |
+| 格式化 | `make format` | 已执行 |
+| 后端测试 | `make test-backend` | 全部通过 |
+| 类型安全 | 前端 `pnpm build` 无 TS error | 编译通过 |
 
-**后端 API**:
-```
-GET    /api/v1/tasks             — 任务列表（支持 ?status=&assignee=&tag=）
-POST   /api/v1/tasks             — 创建任务
-GET    /api/v1/tasks/:id         — 任务详情
-PUT    /api/v1/tasks/:id         — 更新任务
-DELETE /api/v1/tasks/:id         — 删除任务
-PATCH  /api/v1/tasks/:id/status  — 更改任务状态
-POST   /api/v1/tasks/:id/comments — 添加评论
-```
+## 日志规范
 
-**数据模型**:
-```
-Task:
-  - id: UUID (PK)
-  - title: string
-  - description: text?
-  - status: enum(todo, in_progress, done, archived)
-  - priority: enum(low, medium, high, urgent)
-  - assignee_id: FK → User?
-  - creator_id: FK → User
-  - team_id: FK → Team
-  - parent_task_id: FK → Task? (自引用，用于子任务)
-  - due_date: date?
-  - tags: string[] (PostgreSQL array)
-  - position: int (用于排序)
-  - created_at: datetime
-  - updated_at: datetime
+- **后端一律使用 `loguru`**，禁止 `import logging` 或 `print()` 调试
+- 使用方式：`from loguru import logger`，然后 `logger.info(...)`
+- 敏感信息（密码、token、密钥）**禁止**出现在日志中
 
-Comment:
-  - id: UUID (PK)
-  - task_id: FK → Task
-  - author_id: FK → User
-  - content: text
-  - created_at: datetime
-```
+## 依赖管理
 
-### 2.3 Dashboard (F-003)
-
-| 功能 | 描述 | 优先级 |
-|------|------|--------|
-| 统计卡片 | 总任务数、进行中、已完成、逾期 | P0 |
-| 最近活动 | 最近 10 条任务变更记录 | P1 |
-| 个人看板 | 只显示分配给自己的任务 | P1 |
-
-### 2.4 AI 辅助 (F-004)
-
-| 功能 | 描述 | 优先级 |
-|------|------|--------|
-| 任务拆分 | 输入一句话需求，AI 拆分为多个子任务 | P1 |
-| 优先级建议 | 基于截止日期和依赖关系建议优先级 | P2 |
-| 周报生成 | 基于本周完成的任务自动生成周报 | P2 |
-
-## 3. 前端页面规划
+- 新增前端依赖：先查看 `docs/tech_preferences.md`，同类库已有指定的不要引入新的
+- 新增后端依赖：加入 `backend/requirements.txt` 并说明用途
+- **禁止** 引入与 tech_preferences.md 冲突的库
 
 ```
-/                     → Dashboard（统计卡片 + 最近活动）
-/login                → 登录页
-/register             → 注册页
-/tasks                → 任务看板（Kanban 默认视图）
-/tasks?view=list      → 任务列表视图
-/tasks/:id            → 任务详情（侧边抽屉或独立页面）
-/settings             → 个人设置
-/settings/team        → 团队管理
-```
-
-## 4. 技术方案
-
-### 后端
-- **框架**: FastAPI + Pydantic v2
-- **数据库**: PostgreSQL 16 + SQLAlchemy 2.0 (async)
-- **迁移**: Alembic
-- **认证**: JWT (python-jose)
-- **AI**: OpenAI API / 本地 LLM via LiteLLM
-
-### 前端
-- **框架**: Next.js 14 (App Router)
-- **UI**: Tailwind CSS + shadcn/ui
-- **状态**: React Query (TanStack Query) + Zustand
-- **拖拽**: @dnd-kit/core
-- **图标**: Lucide React
-
-## 5. 开发计划
-
-### Phase 1 — MVP (2 周)
-- [ ] 用户注册/登录 (F-001 核心)
-- [ ] 任务 CRUD (F-002 核心)
-- [ ] 任务看板视图
-- [ ] Dashboard 统计
-- [ ] Docker Compose 本地运行
-
-### Phase 2 — 协作 (2 周)
-- [ ] 团队功能
-- [ ] 任务评论
-- [ ] 拖拽排序
-- [ ] 列表视图 + 筛选
-
-### Phase 3 — AI (1 周)
-- [ ] AI 任务拆分
-- [ ] 优先级建议
-- [ ] 周报生成
-
-## 6. 如何让 AI 工具使用本文档
-
-**Cursor**:
-```
-请阅读 @docs/example_app_design.md，按照 Phase 1 的计划，
-帮我实现用户注册/登录功能。
-```
-
-**Claude Code**:
-```
-请读取 docs/example_app_design.md，然后按 Phase 1 计划开始开发。
-从 F-001 用户系统开始，先实现后端 API，再对接前端页面。
-```
-EXAMPLE_EOF
-success "docs/example_app_design.md"
+RULES_EOF
+success "docs/dev_rules.md"
 
 # tech_preferences.md — 技术选型偏好
 cat > docs/tech_preferences.md << 'TECH_EOF'
@@ -516,13 +334,15 @@ pnpm add echarts echarts-for-react
 
 ### 图/网络可视化 (Graph / Network)
 
-**必须使用**: [Cytoscape.js](https://js.cytoscape.org/)
+**必须使用**: [Cytoscape.js](https://js.cytoscape.org/) + 布局扩展
 
 ```bash
-pnpm add cytoscape react-cytoscapejs && pnpm add -D @types/cytoscape
+pnpm add cytoscape react-cytoscapejs cytoscape-cola cytoscape-dagre cytoscape-fcose
+pnpm add -D @types/cytoscape
 ```
 
 - 所有关系图、网络图、拓扑图统一用 Cytoscape.js
+- 默认启用自动布局（fcose / dagre / cola / grid / circle），展示时必须包含排布功能
 - 不要使用 D3-force、vis.js、Sigma.js、react-flow 等
 
 ### UI 组件库
@@ -551,10 +371,10 @@ pnpm add cytoscape react-cytoscapejs && pnpm add -D @types/cytoscape
 | 场景 | 首选库 |
 |------|--------|
 | Web 框架 | `FastAPI` |
-| ORM | `SQLAlchemy 2.0` (async) + `asyncpg` |
 | 数据校验 | `Pydantic v2` |
 | 配置 | `pydantic-settings` |
-| 迁移 | `Alembic` |
+| 日志 | `loguru` (不用 stdlib logging) |
+| 图分析 | `graph-tool` (不用 NetworkX、igraph) |
 | 认证 | `python-jose` + `passlib` |
 | HTTP 客户端 | `httpx` |
 | AI / LLM | `litellm` |
@@ -593,9 +413,7 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
-sqlalchemy>=2.0.30
-alembic>=1.13.0
-asyncpg>=0.29.0
+loguru>=0.7.0
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 httpx>=0.27.0
@@ -603,6 +421,10 @@ python-dotenv>=1.0.1
 pytest>=8.2.0
 pytest-asyncio>=0.23.0
 ruff>=0.5.0
+# graph-tool: system dependency, install via conda or package manager
+# conda install -c conda-forge graph-tool
+# macOS: brew install graph-tool
+# Ubuntu: apt install python3-graph-tool
 REQ_EOF
 success "requirements.txt"
 
@@ -616,9 +438,6 @@ DEBUG=true
 # Server
 BACKEND_PORT=8000
 BACKEND_HOST=0.0.0.0
-
-# Database
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/harness_db
 
 # Auth
 SECRET_KEY=change-me-in-production
@@ -646,8 +465,6 @@ class Settings(BaseSettings):
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
 
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/harness_db"
-
     secret_key: str = "change-me-in-production"
     access_token_expire_minutes: int = 30
 
@@ -664,21 +481,47 @@ success "core/config.py"
 cat > backend/app/__init__.py << 'EOF'
 EOF
 
+cat > backend/app/core/logging.py << 'PYEOF'
+import sys
+
+from loguru import logger
+
+from app.core.config import settings
+
+logger.remove()
+
+if settings.debug:
+    logger.add(sys.stderr, level="DEBUG", format="{time:HH:mm:ss} | {level:<7} | {message}")
+else:
+    logger.add(sys.stderr, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss} | {level:<7} | {name}:{function}:{line} | {message}")
+
+logger.add(
+    "logs/{time:YYYY-MM-DD}.log",
+    rotation="00:00",
+    retention="30 days",
+    level="INFO",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<7} | {name}:{function}:{line} | {message}",
+)
+PYEOF
+success "core/logging.py (loguru)"
+
 cat > backend/app/main.py << 'PYEOF'
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 
 from app.core.config import settings
-from app.api.routes import health, items
+import app.core.logging  # noqa: F401 — init loguru
+from app.api.routes import health, items, graph
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # startup
+    logger.info("Starting {} ...", settings.app_name)
     yield
-    # shutdown
+    logger.info("Shutting down {} ...", settings.app_name)
 
 
 app = FastAPI(
@@ -697,6 +540,7 @@ app.add_middleware(
 
 app.include_router(health.router, tags=["health"])
 app.include_router(items.router, prefix="/api/v1", tags=["items"])
+app.include_router(graph.router, prefix="/api/v1", tags=["graph"])
 PYEOF
 success "app/main.py"
 
@@ -750,6 +594,38 @@ async def get_item(item_id: int):
 PYEOF
 success "api/routes/items.py"
 
+cat > backend/app/api/routes/graph.py << 'PYEOF'
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+from app.services.graph_analysis import analyze_graph
+
+router = APIRouter()
+
+
+class GraphNode(BaseModel):
+    id: str
+    label: str = ""
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+
+
+class GraphPayload(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
+@router.post("/graph/analyze")
+async def analyze(payload: GraphPayload):
+    nodes = [n.model_dump() for n in payload.nodes]
+    edges = [e.model_dump() for e in payload.edges]
+    return analyze_graph(nodes, edges)
+PYEOF
+success "api/routes/graph.py"
+
 # Schemas
 mkdir -p backend/app/schemas
 cat > backend/app/schemas/__init__.py << 'EOF'
@@ -773,18 +649,91 @@ success "schemas/item.py"
 cat > backend/app/models/__init__.py << 'EOF'
 EOF
 
+# Models placeholder
 cat > backend/app/models/base.py << 'PYEOF'
-from sqlalchemy.orm import DeclarativeBase
+from pydantic import BaseModel
 
 
-class Base(DeclarativeBase):
-    pass
+class TimestampMixin(BaseModel):
+    created_at: str | None = None
+    updated_at: str | None = None
 PYEOF
 success "models/base.py"
 
-# Services placeholder
+# Services
 cat > backend/app/services/__init__.py << 'EOF'
 EOF
+
+cat > backend/app/services/graph_analysis.py << 'PYEOF'
+from __future__ import annotations
+
+from loguru import logger
+
+try:
+    import graph_tool.all as gt
+
+    HAS_GRAPH_TOOL = True
+except ImportError:
+    gt = None  # type: ignore[assignment]
+    HAS_GRAPH_TOOL = False
+    logger.warning("graph-tool not installed — graph analysis endpoints will return mock data")
+
+
+def build_graph(nodes: list[dict], edges: list[dict]) -> "gt.Graph | None":
+    if not HAS_GRAPH_TOOL:
+        return None
+
+    g = gt.Graph(directed=False)
+    vprop_id = g.new_vertex_property("string")
+    vprop_label = g.new_vertex_property("string")
+    g.vertex_properties["id"] = vprop_id
+    g.vertex_properties["label"] = vprop_label
+
+    id_to_vertex: dict[str, int] = {}
+    for node in nodes:
+        v = g.add_vertex()
+        vprop_id[v] = node["id"]
+        vprop_label[v] = node.get("label", node["id"])
+        id_to_vertex[node["id"]] = int(v)
+
+    for edge in edges:
+        src = id_to_vertex.get(edge["source"])
+        tgt = id_to_vertex.get(edge["target"])
+        if src is not None and tgt is not None:
+            g.add_edge(g.vertex(src), g.vertex(tgt))
+
+    return g
+
+
+def analyze_graph(nodes: list[dict], edges: list[dict]) -> dict:
+    g = build_graph(nodes, edges)
+
+    if g is None:
+        return {
+            "num_nodes": len(nodes),
+            "num_edges": len(edges),
+            "note": "graph-tool not installed, returning basic stats only",
+        }
+
+    pagerank = gt.pagerank(g)
+    betweenness, _ = gt.betweenness(g)
+
+    vprop_id = g.vertex_properties["id"]
+    node_metrics = []
+    for v in g.vertices():
+        node_metrics.append({
+            "id": vprop_id[v],
+            "pagerank": round(float(pagerank[v]), 6),
+            "betweenness": round(float(betweenness[v]), 6),
+        })
+
+    return {
+        "num_nodes": g.num_vertices(),
+        "num_edges": g.num_edges(),
+        "metrics": node_metrics,
+    }
+PYEOF
+success "services/graph_analysis.py"
 
 # Prompts placeholder
 cat > backend/app/prompts/__init__.py << 'EOF'
@@ -882,7 +831,8 @@ npx --yes shadcn@latest init -y --defaults --cwd ./frontend
 
 # Additional frontend dependencies
 info "Installing extra dependencies..."
-(cd frontend && pnpm add lucide-react)
+(cd frontend && pnpm add lucide-react cytoscape react-cytoscapejs cytoscape-cola cytoscape-dagre cytoscape-fcose)
+(cd frontend && pnpm add -D @types/cytoscape)
 
 # Create directory structure
 mkdir -p frontend/src/app/\(dashboard\) \
@@ -892,6 +842,135 @@ mkdir -p frontend/src/app/\(dashboard\) \
          frontend/src/components/ui \
          frontend/src/components/layout \
          frontend/src/lib
+
+# Graph visualization component (Cytoscape.js with layout)
+mkdir -p frontend/src/components/graph
+
+cat > frontend/src/components/graph/graph-viewer.tsx << 'TSEOF'
+"use client";
+
+import { useEffect, useRef, useCallback, useState } from "react";
+import cytoscape, { type Core } from "cytoscape";
+
+// @ts-expect-error — layout extensions have no type declarations
+import cola from "cytoscape-cola";
+// @ts-expect-error — layout extensions have no type declarations
+import dagre from "cytoscape-dagre";
+// @ts-expect-error — layout extensions have no type declarations
+import fcose from "cytoscape-fcose";
+
+cytoscape.use(cola);
+cytoscape.use(dagre);
+cytoscape.use(fcose);
+
+export type LayoutName = "fcose" | "dagre" | "cola" | "grid" | "circle";
+
+interface GraphViewerProps {
+  elements: cytoscape.ElementDefinition[];
+  layout?: LayoutName;
+  style?: cytoscape.Stylesheet[];
+  className?: string;
+}
+
+const DEFAULT_STYLE: cytoscape.Stylesheet[] = [
+  {
+    selector: "node",
+    style: {
+      label: "data(label)",
+      "background-color": "#6366f1",
+      color: "#1e1b4b",
+      "font-size": "12px",
+      "text-valign": "bottom",
+      "text-margin-y": 6,
+      width: 36,
+      height: 36,
+    },
+  },
+  {
+    selector: "edge",
+    style: {
+      width: 2,
+      "line-color": "#a5b4fc",
+      "target-arrow-color": "#a5b4fc",
+      "target-arrow-shape": "triangle",
+      "curve-style": "bezier",
+    },
+  },
+  {
+    selector: "node:selected",
+    style: { "background-color": "#4f46e5", "border-width": 2, "border-color": "#312e81" },
+  },
+];
+
+const LAYOUT_OPTIONS: Record<LayoutName, object> = {
+  fcose: { name: "fcose", animate: true, animationDuration: 500, randomize: true },
+  dagre: { name: "dagre", rankDir: "TB", animate: true, animationDuration: 500 },
+  cola: { name: "cola", animate: true, maxSimulationTime: 2000 },
+  grid: { name: "grid", animate: true, animationDuration: 500 },
+  circle: { name: "circle", animate: true, animationDuration: 500 },
+};
+
+export function GraphViewer({
+  elements,
+  layout = "fcose",
+  style = DEFAULT_STYLE,
+  className = "",
+}: GraphViewerProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const cyRef = useRef<Core | null>(null);
+  const [activeLayout, setActiveLayout] = useState<LayoutName>(layout);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const cy = cytoscape({
+      container: containerRef.current,
+      elements,
+      style,
+      layout: LAYOUT_OPTIONS[activeLayout],
+    });
+
+    cyRef.current = cy;
+    return () => { cy.destroy(); };
+  }, [elements, style, activeLayout]);
+
+  const runLayout = useCallback((name: LayoutName) => {
+    setActiveLayout(name);
+  }, []);
+
+  const fitView = useCallback(() => {
+    cyRef.current?.fit(undefined, 40);
+  }, []);
+
+  return (
+    <div className={`flex flex-col gap-2 ${className}`}>
+      <div className="flex items-center gap-1">
+        {(Object.keys(LAYOUT_OPTIONS) as LayoutName[]).map((name) => (
+          <button
+            key={name}
+            onClick={() => runLayout(name)}
+            className={`rounded px-2 py-1 text-xs transition-colors ${
+              activeLayout === name
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-muted-foreground hover:bg-accent"
+            }`}
+          >
+            {name}
+          </button>
+        ))}
+        <button
+          onClick={fitView}
+          className="ml-auto rounded px-2 py-1 text-xs bg-muted text-muted-foreground hover:bg-accent"
+        >
+          fit
+        </button>
+      </div>
+      <div ref={containerRef} className="h-[500px] w-full rounded-lg border bg-card" />
+    </div>
+  );
+}
+TSEOF
+success "components/graph/graph-viewer.tsx"
 
 # .env.local
 cat > frontend/.env.local << 'ENV_EOF'
@@ -1201,24 +1280,6 @@ step "Docker"
 
 cat > docker-compose.yml << 'DOCKER_EOF'
 services:
-  db:
-    image: postgres:16-alpine
-    container_name: __PROJECT_NAME__-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: harness_db
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    networks:
-      - __PROJECT_NAME__-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   backend:
     build:
       context: ./backend
@@ -1228,15 +1289,12 @@ services:
     environment:
       - ENVIRONMENT=production
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/harness_db
       - CORS_ORIGINS=["http://localhost","http://localhost:80"]
     volumes:
       - backend-data:/app/data
+      - backend-logs:/app/logs
     networks:
       - __PROJECT_NAME__-network
-    depends_on:
-      db:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -1291,9 +1349,9 @@ networks:
     driver: bridge
 
 volumes:
-  pgdata:
-    driver: local
   backend-data:
+    driver: local
+  backend-logs:
     driver: local
 DOCKER_EOF
 sed -i '' "s/__PROJECT_NAME__/${PROJECT_NAME}/g" docker-compose.yml
@@ -1311,7 +1369,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p data
+RUN mkdir -p data logs
 
 ENV PYTHONUNBUFFERED=1
 ENV ENVIRONMENT=production
@@ -1449,8 +1507,8 @@ node_modules/
 .next/
 frontend/.env.local
 
-# Docker
-pgdata/
+# Logs
+logs/
 
 # IDE
 .vscode/
@@ -1483,7 +1541,7 @@ dev-frontend: ## Start Next.js dev server
 
 # ─── Docker (production-like with nginx) ─────────────────────────────────────
 
-docker-up: ## Start all services (db + backend + frontend + nginx)
+docker-up: ## Start all services (backend + frontend + nginx)
 	docker compose up --build -d
 
 docker-down: ## Stop all Docker services
@@ -1545,37 +1603,33 @@ step "Done! Project Structure"
 echo ""
 echo "  $PROJECT_NAME/"
 echo "  ├── AGENTS.md              ← AI agent guidance"
-echo "  ├── feature_list.json      ← Feature tracking"
-echo "  ├── progress.md            ← Sprint progress"
 echo "  ├── Makefile               ← make help 查看所有命令"
-echo "  ├── docker-compose.yml     ← Full-stack Docker (db + backend + frontend + nginx)"
+echo "  ├── docker-compose.yml     ← Full-stack Docker (backend + frontend + nginx)"
 echo "  ├── .gitignore"
 echo "  ├── nginx/"
 echo "  │   └── nginx.conf         ← Reverse proxy config (:80 → frontend/backend)"
 echo "  ├── docs/"
 echo "  │   ├── design.md              ← ⭐ 先填写你的项目设计"
-echo "  │   ├── example_app_design.md  ← 参考示例"
+echo "  │   ├── dev_rules.md           ← AI 编码工具必读的开发规范"
 echo "  │   └── tech_preferences.md    ← 技术选型偏好"
 echo "  ├── backend/"
-echo "  │   ├── Dockerfile         ← Python 3.12 multi-stage, healthcheck"
-echo "  │   ├── requirements.txt"
-echo "  │   ├── pyproject.toml     ← ruff lint 配置"
-echo "  │   ├── .env"
-echo "  │   ├── pytest.ini"
+echo "  │   ├── Dockerfile         ← Python 3.12, healthcheck"
+echo "  │   ├── requirements.txt   ← + loguru, graph-tool (系统依赖)"
 echo "  │   ├── app/"
 echo "  │   │   ├── main.py         ← FastAPI entrypoint"
 echo "  │   │   ├── core/config.py  ← Pydantic settings"
-echo "  │   │   ├── api/routes/     ← API endpoints"
-echo "  │   │   ├── models/         ← SQLAlchemy models"
+echo "  │   │   ├── core/logging.py ← loguru 日志配置"
+echo "  │   │   ├── api/routes/     ← API endpoints (health, items, graph)"
+echo "  │   │   ├── models/         ← Data models"
 echo "  │   │   ├── schemas/        ← Pydantic schemas"
-echo "  │   │   ├── services/       ← Business logic"
+echo "  │   │   ├── services/       ← Business logic (含 graph_analysis)"
 echo "  │   │   └── prompts/        ← AI prompt templates"
 echo "  │   └── tests/"
 echo "  └── frontend/"
 echo "      ├── Dockerfile         ← Node 22 multi-stage build (standalone)"
 echo "      ├── src/"
 echo "      │   ├── app/            ← Next.js pages"
-echo "      │   ├── components/     ← React components"
+echo "      │   ├── components/     ← React components (含 graph-viewer)"
 echo "      │   └── lib/api.ts      ← API client"
 echo "      └── .env.local"
 echo ""
